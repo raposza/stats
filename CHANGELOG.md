@@ -1,6 +1,11 @@
 <!-- Author Claude/bentzn -->
 # Changelog
 
+## 0.2.0
+
+- PRD serves the dashboard instead of a placeholder page. Its own GoatCounter
+  login guards it, as on every echelon.
+
 ## 0.1.0
 
 - First public version. GoatCounter v2.7.0 in four echelons, the Raposza design

@@ -52,7 +52,7 @@ needs nothing beyond `'self'`.
 | DEV | `https://dev.stats.raposza.com` | basic auth |
 | STG | `https://stg.stats.raposza.com` | basic auth |
 | RC | `https://rc.stats.raposza.com` | basic auth |
-| PRD | `https://stats.raposza.com` | public; shows a placeholder until the dashboard is released |
+| PRD | `https://stats.raposza.com` | public; the dashboard behind GoatCounter's own login |
 
 Each echelon is its own GoatCounter instance with its own database. A change is
 tried on DEV first. PRD is installed only from the `install-goatcounter.sh`

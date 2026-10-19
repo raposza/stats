@@ -49,9 +49,10 @@
 #
 # GitHub: every echelon runs the same gh-traffic.py daily (timer goatcounter-gh-<echelon>),
 # copying the traffic of every public repo of $STR_GH_OWNER into its own dashboard, so all
-# four dashboards carry the same GitHub numbers. It needs one fine-grained token with
-# Repository permission "Administration: Read-only" in /etc/goatcounter/github.token;
-# without that file the timer is installed but not enabled.
+# four dashboards carry the same GitHub numbers. The same run counts the downloads of the
+# release assets of every public repo, checksum and signature files excepted. It needs one
+# fine-grained token with Repository permission "Administration: Read-only" in
+# /etc/goatcounter/github.token; without that file the timer is installed but not enabled.
 set -euo pipefail
 
 STR_VERSION=v2.7.0
@@ -142,6 +143,7 @@ set_echelon() {
   FILE_ENV=$DIR_ETC/$STR_ECHELON.env
   FILE_GHPY=$DIR_BIN/gh-traffic.py
   FILE_GH_STATE=$DIR_DATA/gh-state.json
+  FILE_GH_DL_STATE=$DIR_DATA/gh-downloads.json
   STR_GH_UNIT=goatcounter-gh-$STR_ECHELON
   FILE_GH_SERVICE=/etc/systemd/system/$STR_GH_UNIT.service
   FILE_GH_TIMER=/etc/systemd/system/$STR_GH_UNIT.timer
@@ -519,6 +521,7 @@ GC_TOKEN_FILE=$FILE_API
 GH_OWNER=$STR_GH_OWNER
 GH_TOKEN_FILE=$FILE_GH_TOKEN
 GH_STATE=$FILE_GH_STATE
+GH_DL_STATE=$FILE_GH_DL_STATE
 EOF
 }
 
@@ -573,8 +576,16 @@ cat <<'GHPYEOF'
 # events named github.com/<owner>/<repo> clone. GitHub's total view and clone counts
 # and its top-10 referrers have no place in that model and are not copied.
 #
+# Release downloads: GitHub keeps one running download_count per release asset and no
+# dates. The totals last seen are kept per <repo>|<asset id> (download state file); what a
+# total grew by becomes that many events named github.com/<owner>/<repo> download, stamped
+# at the time of this run. An asset seen for the first time brings its whole total, stamped
+# at the asset's created_at. A total that goes down posts nothing and the higher value is
+# kept. Draft releases and checksum and signature files are not counted.
+#
 # Environment (from /etc/goatcounter/<echelon>.env):
 #   GC_URL, GC_HOST, GC_TOKEN_FILE, GH_OWNER, GH_TOKEN_FILE, GH_STATE
+#   GH_DL_STATE (optional, default gh-downloads.json beside GH_STATE)
 #   GH_API (optional, default https://api.github.com)
 import datetime
 import json
@@ -585,6 +596,10 @@ import urllib.error
 import urllib.request
 
 N_MAX_HITS = 500
+
+SET_DL_SKIP_NAMES = {'sha256sums', 'sha512sums', 'checksums.txt'}
+
+TUP_DL_SKIP_SUFFIXES = ('.sha256', '.sha512', '.md5', '.asc', '.sig')
 
 
 def die(strMsg):
@@ -631,6 +646,22 @@ def gh_repos(strApi, strOwner, strToken):
         nPage += 1
 
 
+def gh_releases(strApi, strOwner, strRepo, strToken):
+    lstReleases = []
+    nPage = 1
+    while True:
+        lstPage = gh_get(strApi + '/repos/' + strOwner + '/' + strRepo + '/releases?per_page=100&page=' + str(nPage), strToken)
+        lstReleases.extend(objRel for objRel in lstPage if not objRel.get('draft'))
+        if len(lstPage) < 100:
+            return lstReleases
+        nPage += 1
+
+
+def counted_asset(strName):
+    strLower = strName.lower()
+    return strLower not in SET_DL_SKIP_NAMES and not strLower.endswith(TUP_DL_SKIP_SUFFIXES)
+
+
 def gc_post(strUrl, strHost, strToken, lstHits):
     bytesBody = json.dumps({'filter': [], 'hits': lstHits}).encode('utf-8')
     req = urllib.request.Request(strUrl + '/api/v0/count', data=bytesBody, method='POST', headers={
@@ -660,6 +691,67 @@ def save_state(fileState, setDone):
     os.replace(fileTmp, fileState)
 
 
+def load_dl_state(fileState):
+    if not os.path.exists(fileState):
+        return {}
+    with open(fileState, encoding='utf-8') as fileIn:
+        return {strKey: int(nTotal) for strKey, nTotal in json.load(fileIn).items()}
+
+
+def save_dl_state(fileState, mapTotals):
+    dirState = os.path.dirname(fileState)
+    nFd, fileTmp = tempfile.mkstemp(dir=dirState, prefix='.gh-downloads.')
+    with os.fdopen(nFd, 'w', encoding='utf-8') as fileOut:
+        json.dump(mapTotals, fileOut, indent=0, sort_keys=True)
+    os.replace(fileTmp, fileState)
+
+
+def download_hits(strOwner, strRepo, nAssetId, nFrom, nTo, strCreatedAt):
+    lstHits = []
+    for n in range(nFrom, nTo):
+        lstHits.append({
+            'path': 'github.com/' + strOwner + '/' + strRepo + ' download',
+            'title': strOwner + '/' + strRepo + ' (download)',
+            'event': True,
+            'created_at': strCreatedAt,
+            'session': 'gh|download|%s|%d|%d' % (strRepo, nAssetId, n)})
+    return lstHits
+
+
+def copy_downloads(strApi, strOwner, strGhToken, lstRepos, strGcUrl, strGcHost, strGcToken, fileDlState):
+    strNow = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    mapTotals = load_dl_state(fileDlState)
+    nRepos = 0
+    nCopied = 0
+    for strRepo in lstRepos:
+        lstReleases = gh_releases(strApi, strOwner, strRepo, strGhToken)
+        if not lstReleases:
+            continue
+        nRepos += 1
+        lstHits = []
+        mapNew = {}
+        for objRel in lstReleases:
+            for objAsset in objRel.get('assets', []):
+                if not counted_asset(objAsset['name']):
+                    continue
+                nAssetId = int(objAsset['id'])
+                nTotal = int(objAsset['download_count'])
+                strKey = '%s|%d' % (strRepo, nAssetId)
+                if strKey not in mapTotals:
+                    lstHits.extend(download_hits(strOwner, strRepo, nAssetId, 0, nTotal, objAsset['created_at']))
+                    mapNew[strKey] = nTotal
+                elif nTotal > mapTotals[strKey]:
+                    lstHits.extend(download_hits(strOwner, strRepo, nAssetId, mapTotals[strKey], nTotal, strNow))
+                    mapNew[strKey] = nTotal
+        for nStart in range(0, len(lstHits), N_MAX_HITS):
+            gc_post(strGcUrl, strGcHost, strGcToken, lstHits[nStart:nStart + N_MAX_HITS])
+        if mapNew:
+            mapTotals.update(mapNew)
+            save_dl_state(fileDlState, mapTotals)
+            nCopied += len(lstHits)
+    return nRepos, nCopied
+
+
 def hits_for(strOwner, strRepo, strKind, objDay):
     strDay = objDay['timestamp'][:10]
     strPath = 'github.com/' + strOwner + '/' + strRepo
@@ -684,6 +776,7 @@ def main():
     strOwner = env('GH_OWNER')
     strGhToken = read_secret(env('GH_TOKEN_FILE'))
     fileState = env('GH_STATE')
+    fileDlState = env('GH_DL_STATE', os.path.join(os.path.dirname(fileState), 'gh-downloads.json'))
     strApi = env('GH_API', 'https://api.github.com')
 
     strToday = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
@@ -710,7 +803,9 @@ def main():
                 save_state(fileState, setDone)
                 nDays += len(lstKeys)
                 nHits += len(lstHits)
-    print('gh-traffic: %d repos, %d new repo-days, %d unique visitors/cloners copied' % (len(lstRepos), nDays, nHits))
+    nDlRepos, nDownloads = copy_downloads(strApi, strOwner, strGhToken, lstRepos, strGcUrl, strGcHost, strGcToken, fileDlState)
+    print('gh-traffic: %d repos, %d new repo-days, %d unique visitors/cloners copied; %d repos with releases, %d downloads copied'
+          % (len(lstRepos), nDays, nHits, nDlRepos, nDownloads))
 
 
 if __name__ == '__main__':
@@ -840,6 +935,7 @@ report() {
   printf '  %-26s %s\n' "api token (count)" "$( [ -f "$FILE_API" ] && echo present || echo absent)"
   printf '  %-26s %s\n' "timer $STR_GH_UNIT" "$(systemctl is-enabled "$STR_GH_UNIT.timer" 2>/dev/null || true)"
   printf '  %-26s %s\n' "github repo-days copied" "$( [ -f "$FILE_GH_STATE" ] && python3 -I -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$FILE_GH_STATE" || echo 0)"
+  printf '  %-26s %s\n' "github release downloads" "$( [ -f "$FILE_GH_DL_STATE" ] && python3 -I -c 'import json,sys;m=json.load(open(sys.argv[1]));print("%d over %d assets" % (sum(m.values()), len(m)))' "$FILE_GH_DL_STATE" || echo "0 over 0 assets")"
   printf '  %-26s %s\n' "last applied from" "$( [ -f "$FILE_SOURCE" ] && tr '\n' ' ' <"$FILE_SOURCE" || echo unrecorded)"
   printf '  %-26s %s\n' "other $STR_VHOST vhost" "$(foreign_vhost | tr '\n' ' ')"
   strSites=$(grep -rlsF "include $FILE_INC" /etc/nginx --include='*.conf' || true)

@@ -23,6 +23,12 @@ dashboard user sees.
   each day's unique cloners become events named
   `github.com/raposza/<repo> clone`. GitHub's total views and clones and its
   referrers are not copied. Private repositories are not counted.
+- Downloads of the release assets of every public `raposza` repository, in the
+  same daily run: GitHub keeps one running total per file and no dates, so
+  what a total grew by since the last run becomes that many events named
+  `github.com/raposza/<repo> download`, dated at the run. A file seen for the
+  first time brings its whole total, dated when the file was uploaded. Draft
+  releases and checksum and signature files are not counted.
 - The page path carries the site's host - `net.raposza.com/api.html` - which
   is what puts every site on one dashboard.
 

@@ -1,6 +1,13 @@
 <!-- Author Claude/bentzn -->
 # Changelog
 
+## 0.3.0
+
+- The daily GitHub copy also counts the downloads of the release assets of
+  every public repository, one counter per repository,
+  `github.com/raposza/<repo> download`. Draft releases and checksum and
+  signature files are not counted.
+
 ## 0.2.0
 
 - PRD serves the dashboard instead of a placeholder page. Its own GoatCounter

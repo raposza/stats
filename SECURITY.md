@@ -1,7 +1,7 @@
 <!-- Author Claude/bentzn -->
 # Security
 
-Reviewed 2026-10-18 for v0.2.0.
+Reviewed 2026-10-19 for v0.3.0.
 
 ## Reporting a vulnerability
 
@@ -65,7 +65,9 @@ None of them is in this repository.
 
 The GitHub copier runs daily as `goatcounter`, reads from `api.github.com`
 with the GitHub token and posts to its echelon's GoatCounter on loopback with
-that echelon's API token.
+that echelon's API token. Besides the traffic it reads the releases of the
+public repositories, which need no permission, and keeps the download totals
+it has seen in `/var/lib/goatcounter/<echelon>/gh-downloads.json`.
 
 ## What the install trusts
 

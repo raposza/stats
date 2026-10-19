@@ -75,6 +75,11 @@ and Hack as the fonts. The two period fields show dates in the format the user
 chose under Settings, Preferences; GoatCounter itself shows them in the
 browser's locale or as `yyyy-mm-dd`.
 
+The Pages list is shown in two groups on the same page: Web pages first, then
+GitHub - every path containing `github.com/raposza`. Each group has its own
+header with its visits, and a filter typed on the dashboard applies to both.
+Totals and the widgets below them still count both groups together.
+
 ## Running it
 
 On the host, as root:

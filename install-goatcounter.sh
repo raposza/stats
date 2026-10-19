@@ -38,7 +38,8 @@
 # Hack as the fonts, the Raposza arcs, and an empty dark.css (the tokens define no
 # dark neutrals, so the dashboard stays light). The dashboard's two period fields show
 # the user's Date format: rz_dates_js_text is appended to the instance's own backend.js,
-# which nginx serves in place of GoatCounter's.
+# which nginx serves in place of GoatCounter's. rz_groups_js_text, appended the same way,
+# shows the Pages list in two groups, Web pages and GitHub.
 #
 # Access: DEV, STG and RC answer only with basic auth (shared file
 # /etc/nginx/raposza-echelons.htpasswd, written once). The credentials are never
@@ -512,6 +513,252 @@ cat <<'JSEOF'
 JSEOF
 }
 
+rz_groups_js_text() {
+cat <<'GRPEOF'
+/*
+ * Author Claude/bentzn
+ *
+ * Raposza: the Pages widget in two groups on the one dashboard - Web pages
+ * first, then GitHub. A GitHub row is a path containing github.com/<owner>,
+ * which the daily GitHub copy writes; every other path is a web page.
+ * The widget is reloaded from the instance's own /load-widget in two parts:
+ * GitHub with the filter github.com/<owner>, every row of it, and Web pages
+ * with the dashboard's filter and the GitHub paths excluded, paginated by
+ * "Show more" as before. A filter typed on the dashboard applies to both: to
+ * Web pages through GoatCounter, to the GitHub rows here, by the same rules
+ * as GoatCounter's own path filter. Each group's header carries its visits.
+ * The page ranking numbers are hidden in the grouped list, since
+ * GoatCounter counts them across both groups. The text chart style is left
+ * ungrouped.
+ * Appended by install-goatcounter.sh to the instance's own backend.js; do not
+ * edit by hand.
+ */
+;(function() {
+	'use strict';
+
+	var GH         = 'github.com/@GH_OWNER@'
+	var GH_SHOWN   = 10
+	var MAX_ROUNDS = 50
+
+	// The keywords of GoatCounter's path filter, as dashboard.js reads them.
+	var KW = /(\b(?:at:start|at:end|is:event|is:pageview|in:path|in:title)|\B:not)\b/g
+
+	// One row against the dashboard filter, as GoatCounter's PathFilter does
+	// in SQL: like '%text%' on lower(path) and lower(title), % and _ as
+	// wildcards, and with :not the two conditions negated but still joined by
+	// "or".
+	var matches = function(filter, row) {
+		var kw = filter.match(KW) || [],
+			s  = filter.replace(KW, '').trim().toLowerCase()
+		var has = function(k) { return kw.indexOf(k) > -1 }
+		var inPath  = has('in:path'),
+			inTitle = has('in:title')
+		if (!inPath && !inTitle)
+			inPath = inTitle = true
+		if (has('is:event') && !row.event)
+			return false
+		if (has('is:pageview') && row.event)
+			return false
+		var re = new RegExp(
+			(has('at:start') ? '^' : '') +
+			s.replace(/[.\\+*?[\]^$(){}=!<>|:\-\/]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.') +
+			(has('at:end') ? '$' : ''))
+		var hitPath  = re.test(row.path.toLowerCase()),
+			hitTitle = re.test(row.title.toLowerCase())
+		if (has(':not'))
+			return (inPath && !hitPath) || (inTitle && !hitTitle)
+		return (inPath && hitPath) || (inTitle && hitTitle)
+	}
+
+	var row_of = function(tr) {
+		var title = $(tr).find('.col-path .page-title')
+		return {
+			path:  tr.id || '',
+			title: title.hasClass('no-title') ? '' : title.text(),
+			event: $(tr).hasClass('event'),
+		}
+	}
+
+	var digits = function(el) { return parseInt(($(el).first().text() || '').replace(/[^0-9]/g, ''), 10) || 0 }
+
+	var ids = function(rows) { return $(rows).toArray().map(function(tr) { return tr.dataset.id }) }
+
+	var load = function(widget, filter, exclude, max) {
+		return jQuery.ajax({
+			url:  BASE_PATH + '/load-widget',
+			type: 'get',
+			data: {
+				widget:         widget,
+				group:          $('#hl-group').val(),
+				max:            max,
+				exclude:        exclude.length ? exclude.join(',') : '0',
+				filter:         filter,
+				'period-start': $('#period-start').val(),
+				'period-end':   $('#period-end').val(),
+			},
+		})
+	}
+
+	// Every GitHub row, page by page.
+	var load_github = function(widget, max) {
+		var dfd   = $.Deferred(),
+			rows  = $(),
+			top   = 0,
+			round = 0
+		var next = function() {
+			load(widget, GH, ids(rows), max).done(function(data) {
+				rows = rows.add($('<tbody>').html(data.html).children('tr[data-id]'))
+				top  = Math.max(top, data.max || 0)
+				if (data.more && ++round < MAX_ROUNDS)
+					next()
+				else
+					dfd.resolve(rows, top)
+			}).fail(dfd.reject)
+		}
+		next()
+		return dfd.promise()
+	}
+
+	var style = function() {
+		if ($('#rz-groups-css').length)
+			return
+		$('<style id="rz-groups-css">').text(
+			'.count-list-pages .rz-head th { padding: 2em 0 15px 0; }\n' +
+			'.count-list-pages .rz-head h2 { margin-top: 0; }\n' +
+			'.count-list-pages .rz-head small { font-weight: normal; }\n' +
+			'.count-list-pages .rz-ctl td { padding-top: 0; }\n' +
+			'.count-list-pages .rz-hidden { display: none; }\n' +
+			'.count-list-pages.rz-grouped .page-n { display: none; }\n'
+		).appendTo('head')
+	}
+
+	var set_scale = function(table, max) {
+		table.attr('data-max', max).attr('data-scale', max)
+		table.find('.scale').text(format_int(max))
+	}
+
+	var redraw = function() { $(window).trigger('resize') }
+
+	var ctl = function(cls) {
+		return $('<tbody class="rz-ctl ' + cls + '"><tr><td colspan="3">' +
+			'<a href="#" class="rz-more">Show more</a>' +
+			'<a href="#" class="rz-less load-less">(show less)</a>' +
+			'</td></tr></tbody>')
+	}
+
+	var group = function(_, el) {
+		var pages = $(el),
+			table = pages.children('table.count-list-pages'),
+			tbody = table.children('tbody.pages')
+		if (!tbody.length || tbody.attr('data-rz') || pages.hasClass('pages-list-text') || !pages.closest('.widget-loaded').length)
+			return
+		tbody.attr('data-rz', '1')
+
+		var widget = pages.attr('data-widget'),
+			filter = $('#filter-paths').val() || '',
+			max    = parseInt(table.attr('data-max'), 10) || 0,
+			total  = digits(pages.find('>.widget-header .total'))
+
+		load_github(widget, max).done(function(ghAll, ghMax) {
+			var exclude = ids(ghAll)
+			load(widget, filter, exclude, max).done(function(web) {
+				if (!$.contains(document, tbody[0]))
+					return
+				style()
+
+				var gh    = ghAll.filter(function(_, tr) { return filter === '' || matches(filter, row_of(tr)) }),
+					ghSum = 0
+				gh.each(function(_, tr) { ghSum += parseInt(tr.dataset.count, 10) || 0 })
+
+				// Web pages: the widget's own header, rows and buttons.
+				var shown = web.total_display || 0
+				tbody.html(web.html)
+				var nInitial = tbody.children('tr').length
+				var head = pages.find('>.widget-header h2').first()
+				head.contents().filter(function() { return this.nodeType === 3 && this.nodeValue.trim() !== '' }).first().replaceWith('Web pages ')
+				head.find('.total-display').text(format_int(shown))
+				head.find('.total').text(format_int(Math.max(total - ghSum, 0)))
+				pages.children('.load-btns').remove()
+				var webCtl = ctl('rz-web-ctl').insertAfter(tbody)
+				webCtl.find('.rz-more').toggle(!!web.more)
+
+				// GitHub: a header row, its rows, and its own buttons.
+				var ghHead = $('<tbody class="rz-head"><tr><th colspan="3"><h2>GitHub <small></small></h2></th></tr></tbody>')
+				ghHead.find('small').text(format_int(ghSum) + ' visits')
+				var ghBody = $('<tbody class="pages rz-gh" data-rz="1">')
+				if (gh.length)
+					ghBody.append(gh)
+				else
+					ghBody.html('<tr><td colspan="3"><em>Nothing to display</em></td></tr>')
+				ghBody.children('tr').slice(GH_SHOWN).addClass('rz-hidden')
+				var ghCtl = ctl('rz-gh-ctl')
+				ghCtl.find('.rz-more').toggle(gh.length > GH_SHOWN)
+				table.append(ghHead, ghBody, ghCtl).addClass('rz-grouped')
+
+				set_scale(table, Math.max(web.max || 0, ghMax))
+				redraw()
+
+				webCtl.on('click', '.rz-more', function(e) {
+					e.preventDefault()
+					var btn = $(this)
+					load(widget, filter, exclude.concat(ids(tbody.children('tr[data-id]'))), parseInt(table.attr('data-max'), 10) || 0).done(function(data) {
+						tbody.append(data.html)
+						shown += data.total_display || 0
+						head.find('.total-display').text(format_int(shown))
+						if ((data.max || 0) > (parseInt(table.attr('data-max'), 10) || 0))
+							set_scale(table, data.max)
+						btn.toggle(!!data.more)
+						webCtl.find('.rz-less').css('display', 'inline')
+						redraw()
+					})
+				})
+				webCtl.on('click', '.rz-less', function(e) {
+					e.preventDefault()
+					tbody.children('tr').slice(nInitial).each(function(_, tr) {
+						shown -= parseInt(tr.dataset.count, 10) || 0
+					}).remove()
+					head.find('.total-display').text(format_int(shown))
+					$(this).css('display', 'none')
+					webCtl.find('.rz-more').css('display', 'inline')
+				})
+				ghCtl.on('click', '.rz-more', function(e) {
+					e.preventDefault()
+					ghBody.children('tr').removeClass('rz-hidden')
+					$(this).css('display', 'none')
+					ghCtl.find('.rz-less').css('display', 'inline')
+					redraw()
+				})
+				ghCtl.on('click', '.rz-less', function(e) {
+					e.preventDefault()
+					ghBody.children('tr').slice(GH_SHOWN).addClass('rz-hidden')
+					$(this).css('display', 'none')
+					ghCtl.find('.rz-more').css('display', 'inline')
+				})
+			}).fail(function() { tbody.removeAttr('data-rz') })
+		}).fail(function() { tbody.removeAttr('data-rz') })
+	}
+
+	var scan = function() {
+		$('#dash-widgets .pages-list').filter(function() {
+			return $(this).children('.widget-header').length && $(this).children('table.count-list-pages').length
+		}).each(group)
+	}
+
+	$(document).ready(function() {
+		var dash = document.getElementById('dash-widgets')
+		if (!dash || !window.format_int)
+			return
+		var timer = null
+		new MutationObserver(function() {
+			clearTimeout(timer)
+			timer = setTimeout(scan, 0)
+		}).observe(dash, {childList: true, subtree: true})
+		scan()
+	})
+})();
+GRPEOF
+}
+
 gh_env_text() {
 cat <<EOF
 # Managed by install-goatcounter.sh - do not edit by hand
@@ -931,6 +1178,7 @@ report() {
   printf '  %-26s %s\n' "include" "$( [ -f "$FILE_INC" ] && echo present || echo absent)"
   printf '  %-26s %s\n' "count.js" "$( [ -f "$FILE_COUNTJS" ] && echo present || echo absent)"
   printf '  %-26s %s\n' "backend.js (date fields)" "$( grep -s 'rz-date' "$FILE_BACKENDJS" >/dev/null && echo present || echo absent)"
+  printf '  %-26s %s\n' "backend.js (page groups)" "$( grep -s 'rz-groups' "$FILE_BACKENDJS" >/dev/null && echo present || echo absent)"
   printf '  %-26s %s\n' "design package" "$(cat "$FILE_DESIGN_VERSION" 2>/dev/null || echo absent) (pinned $STR_DESIGN_VERSION)"
   printf '  %-26s %s\n' "api token (count)" "$( [ -f "$FILE_API" ] && echo present || echo absent)"
   printf '  %-26s %s\n' "timer $STR_GH_UNIT" "$(systemctl is-enabled "$STR_GH_UNIT.timer" 2>/dev/null || true)"
@@ -1031,11 +1279,11 @@ apply() {
   { printf '%s\n' "$STR_SETTINGS"; cat "$fileTmp"; } | write_if_changed "$FILE_COUNTJS" 0644 || true
   rm -f "$fileTmp"
 
-  say "backend.js (the instance's own backend.js + the Raposza date fields)"
+  say "backend.js (the instance's own backend.js + the Raposza date fields and page groups)"
   fileTmp=$(mktemp)
   curl -fsS -H "Host: $STR_VHOST" "http://127.0.0.1:$N_PORT/backend.js" -o "$fileTmp"
   grep 'page_dashboard' "$fileTmp" >/dev/null || die "backend.js from the instance looks wrong"
-  { cat "$fileTmp"; printf '\n'; rz_dates_js_text; } | write_if_changed "$FILE_BACKENDJS" 0644 || true
+  { cat "$fileTmp"; printf '\n'; rz_dates_js_text; printf '\n'; rz_groups_js_text | sed "s|@GH_OWNER@|$STR_GH_OWNER|"; } | write_if_changed "$FILE_BACKENDJS" 0644 || true
   rm -f "$fileTmp"
 
   say "design raposza-design $STR_DESIGN_VERSION"
@@ -1153,6 +1401,9 @@ print(r[0] if r else "")' "$FILE_DB")
   curl_auth -fsS --resolve "$STR_VHOST:443:127.0.0.1" "https://$STR_VHOST/backend.js" | grep 'rz-date' >/dev/null \
     || die "https://$STR_VHOST/backend.js does not carry the Raposza date fields"
   echo "  https://$STR_VHOST/backend.js carries the date fields"
+  curl_auth -fsS --resolve "$STR_VHOST:443:127.0.0.1" "https://$STR_VHOST/backend.js" | grep 'rz-groups' >/dev/null \
+    || die "https://$STR_VHOST/backend.js does not carry the Raposza page groups"
+  echo "  https://$STR_VHOST/backend.js carries the page groups"
 
   say "source $FILE_SOURCE"
   {

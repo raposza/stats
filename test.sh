@@ -41,6 +41,17 @@ else
   red "the date-field script does not parse"
 fi
 
+extract GRPEOF >"$dirTmp/groups.js"
+if [ ! -s "$dirTmp/groups.js" ]; then
+  red "the page-group script not found in $fileInst"
+elif ! command -v node >/dev/null; then
+  printf 'info  node absent; the page-group script was not syntax-checked\n'
+elif node --check "$dirTmp/groups.js"; then
+  ok "the page-group script parses"
+else
+  red "the page-group script does not parse"
+fi
+
 extract CSSEOF >"$dirTmp/css"
 grep -q -- '--rz-accent' "$dirTmp/css" && ok "vars.css maps to the Raposza tokens" || red "vars.css not found or not mapped"
 

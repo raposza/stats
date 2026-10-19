@@ -1,6 +1,11 @@
 <!-- Author Claude/bentzn -->
 # Changelog
 
+## 0.4.0
+
+- The dashboard's Pages list in two groups, Web pages and GitHub, each with
+  its own header and visit count, on the one page.
+
 ## 0.3.0
 
 - The daily GitHub copy also counts the downloads of the release assets of
